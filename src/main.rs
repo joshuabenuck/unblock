@@ -312,10 +312,6 @@ impl Level {
                         let (ox, oy) = self.drag_origin.unwrap();
                         let (dx, dy): (isize, isize) =
                             (bx as isize - ox as isize, by as isize - oy as isize);
-                        println!(
-                            "delta: {} {}; origin: {} {}; block: {} {}",
-                            dx, dy, ox, oy, bx, by
-                        );
                         let mut block = &mut self.blocks[drag_target];
                         block.target_x = block.x1;
                         block.target_y = block.y1;
@@ -324,44 +320,45 @@ impl Level {
                             BlockDir::LeftRight => {
                                 let blocks_wide = block.x2 - block.x1;
                                 // see if this is a valid move
-                                for px in block.x1..if dx > 0 {
-                                    block.x1 + dx as usize
+                                let range: Vec<usize> = if dx > 0 {
+                                    (block.x1..block.x1 + dx as usize + 1).collect()
                                 } else {
-                                    block.x1 - dx.abs() as usize
-                                } + 1
-                                {
-                                    if self.data[xy_to_pos(px, y)] == FLOOR
-                                        || self.data[xy_to_pos(px, y)] == self.data[xy_to_pos(x, y)]
-                                    {
-                                        if self.data[xy_to_pos(px + blocks_wide, y)] == FLOOR
+                                    (block.x1 - dx.abs() as usize..block.x1).rev().collect()
+                                };
+                                for px in range {
+                                    if (self.data[xy_to_pos(px, y)] == FLOOR
+                                        || self.data[xy_to_pos(px, y)] == EXIT
+                                        || self.data[xy_to_pos(px, y)]
+                                            == self.data[xy_to_pos(x, y)])
+                                        && (self.data[xy_to_pos(px + blocks_wide, y)] == FLOOR
                                             || self.data[xy_to_pos(px + blocks_wide, y)]
-                                                == self.data[xy_to_pos(x, y)]
-                                        {
-                                            println!("target x: {}", px);
-                                            block.target_x = px;
-                                        }
+                                                == self.data[xy_to_pos(x, y)])
+                                    {
+                                        block.target_x = px;
+                                    } else {
+                                        break;
                                     }
                                 }
                             }
                             BlockDir::UpDown => {
                                 let blocks_high = block.y2 - block.y1;
                                 // see if this is a valid move
-                                for py in block.y1..if dy > 0 {
-                                    block.y1 + dy as usize
+                                let range: Vec<usize> = if dy > 0 {
+                                    (block.y1..block.y1 + dy as usize + 1).collect()
                                 } else {
-                                    block.y1 - dy.abs() as usize
-                                } + 1
-                                {
-                                    if self.data[xy_to_pos(x, py)] == FLOOR
-                                        || self.data[xy_to_pos(x, py)] == self.data[xy_to_pos(x, y)]
-                                    {
-                                        if self.data[xy_to_pos(x, py + blocks_high)] == FLOOR
+                                    (block.y1 - dy.abs() as usize..block.y1).rev().collect()
+                                };
+                                for py in range {
+                                    if (self.data[xy_to_pos(x, py)] == FLOOR
+                                        || self.data[xy_to_pos(x, py)]
+                                            == self.data[xy_to_pos(x, y)])
+                                        && (self.data[xy_to_pos(x, py + blocks_high)] == FLOOR
                                             || self.data[xy_to_pos(x, py + blocks_high)]
-                                                == self.data[xy_to_pos(x, y)]
-                                        {
-                                            println!("target y: {}", py);
-                                            block.target_y = py;
-                                        }
+                                                == self.data[xy_to_pos(x, y)])
+                                    {
+                                        block.target_y = py;
+                                    } else {
+                                        break;
                                     }
                                 }
                             }
@@ -418,6 +415,8 @@ impl Level {
                             }
                             block.x1 = block.target_x;
                             block.y1 = block.target_y;
+                            block.target_x = 0;
+                            block.target_y = 0;
                             block.x2 = block.x1 + width;
                             block.y2 = block.y1 + height;
                             for x in block.x1..block.x2 + 1 {
@@ -441,7 +440,7 @@ impl Level {
                 (1 + block.x2 - block.x1) * TILE_WIDTH,
                 (1 + block.y2 - block.y1) * TILE_HEIGHT,
             );
-            if block.drag {
+            if block.drag && block.target_x != 0 && block.target_y != 0 {
                 x = block.target_x;
                 y = block.target_y;
             }
