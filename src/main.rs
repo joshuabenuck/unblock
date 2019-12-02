@@ -30,8 +30,11 @@ Add reset
 
 Move block by block or fluid?
 */
+use clap::{App, Arg};
+use failure::Error;
 use glutin_window::GlutinWindow;
 use graphics::{self, Context, Graphics};
+use itertools::put_back;
 use opengl_graphics::{GlGraphics, OpenGL};
 use piston::event_loop::{EventLoop, EventSettings, Events};
 use piston::input::GenericEvent;
@@ -42,6 +45,9 @@ use piston::input::{
 };
 use piston::window::WindowSettings;
 use std::convert::TryInto;
+use std::fs;
+use std::io::Read;
+use std::path::PathBuf;
 
 const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -57,8 +63,10 @@ const TILE_HEIGHT: usize = 50;
 
 const FLOOR: u8 = b'*';
 const WALL: u8 = b'&';
-const LEFTRIGHT: u8 = b'-';
-const UPDOWN: u8 = b'|';
+const LEFTRIGHT1: u8 = b'-';
+const LEFTRIGHT2: u8 = b'_';
+const UPDOWN1: u8 = b'|';
+const UPDOWN2: u8 = b'(';
 const PLAYER: u8 = b'=';
 const EXIT: u8 = b'^';
 
@@ -72,7 +80,7 @@ enum BlockDir {
 #[derive(Debug, PartialEq)]
 enum BlockType {
     Player,
-    Other,
+    Other(u8),
     Wall,
     Exit,
 }
@@ -147,11 +155,77 @@ fn color(block: &Block) -> [f32; 4] {
         BlockType::Player => RED,
         BlockType::Wall => WHITE,
         BlockType::Exit => YELLOW,
-        BlockType::Other => match block.dir {
+        BlockType::Other(_) => match block.dir {
             BlockDir::LeftRight => BLUE,
             BlockDir::UpDown => GREEN,
             _ => panic!("No Static + Other blocks exist"),
         },
+    }
+}
+
+struct LevelSet {
+    levels: Vec<Level>,
+    current: usize,
+}
+
+impl LevelSet {
+    fn load(path: &PathBuf) -> Result<LevelSet, Error> {
+        let mut data = Vec::new();
+        fs::File::open(path.join("levels.dat"))?.read_to_end(&mut data)?;
+        let mut levels = Vec::new();
+        let mut data = put_back(data.into_iter());
+        'outer: loop {
+            let mut b = match data.next() {
+                Some(byte) => byte,
+                None => break,
+            };
+            // Allow comment lines before levels.
+            if b == b'#' {
+                while b != b'\n' {
+                    b = match data.next() {
+                        Some(byte) => byte,
+                        None => break 'outer,
+                    };
+                }
+                continue;
+            }
+            // Skip lines with just whitespace.
+            if b == b' ' || b == b'\r' || b == b'\n' {
+                while b == b' ' || b == b'\r' || b == b'\n' {
+                    b = match data.next() {
+                        Some(byte) => byte,
+                        None => break 'outer,
+                    };
+                }
+                data.put_back(b);
+                continue;
+            }
+            data.put_back(b);
+            println!("level first char {}", b as char);
+            let (lower, _upper) = data.size_hint();
+            if lower < 64 {
+                break;
+            }
+            // Load level data.
+            levels.push(Level::from(&mut data));
+        }
+        Ok(LevelSet { levels, current: 0 })
+    }
+
+    fn current(&mut self) -> &mut Level {
+        &mut self.levels[self.current]
+    }
+
+    fn next(&mut self) {
+        if self.current + 1 < self.levels.len() {
+            self.current += 1;
+        }
+    }
+
+    fn previous(&mut self) {
+        if self.current > 0 {
+            self.current -= 1;
+        }
     }
 }
 
@@ -165,39 +239,40 @@ struct Level {
 }
 
 impl Level {
+    fn from<I: Iterator<Item = u8> + Sized>(data: &mut I) -> Level {
+        let mut level = Level::new();
+        level.parse(data);
+        level
+    }
+
     fn new() -> Level {
-        let mut level = Level {
+        Level {
             data: [FLOOR; TILES_WIDE * TILES_HIGH],
             blocks: Vec::new(),
             mouse_pos: (0, 0),
             drag_origin: None,
             drag_target: None,
-        };
-        level.parse();
-        level
+        }
     }
 
-    fn parse(&mut self) {
-        let level1 = "\
-                      &&&&&&&&\
-                      &---**|&\
-                      &**|**|&\
-                      &==|**|^\
-                      &|*|*--&\
-                      &|***|*&\
-                      &---*|*&\
-                      &&&&&&&&\
-                      ";
+    fn parse<'a, I: Iterator<Item = u8> + Sized>(&mut self, data: &'a mut I) -> &'a mut I {
         let mut pos = 0;
-        level1
-            .replace(" ", "")
-            .replace("\n", "")
-            .bytes()
-            .for_each(|b| {
+        loop {
+            let b = match data.next() {
+                Some(byte) => byte,
+                None => panic!("Not enough level data"),
+            };
+            if b != b' ' && b != b'\r' && b != b'\n' {
                 self.data[pos] = b;
                 pos += 1;
-            });
+            }
+            if pos == 64 {
+                break;
+            }
+        }
+        println!("{}", String::from_utf8(self.data.to_vec()).unwrap());
         let mut id = 1;
+        assert!(pos == 64, "Corrupt data passed to parse: {}", pos);
         assert!(self.data.len() == 64, "Too many chars: {}", self.data.len());
         for pos in 0..self.data.len() {
             let (x, y) = pos_to_xy(pos);
@@ -206,16 +281,16 @@ impl Level {
                     self.blocks
                         .push(Block::new(BlockType::Wall, BlockDir::Static, x, y, x, y));
                 }
-                LEFTRIGHT => {
+                ch @ LEFTRIGHT1 | ch @ LEFTRIGHT2 => {
                     let mut pos2 = pos.clone();
-                    while self.data[pos2] == LEFTRIGHT {
+                    while self.data[pos2] == ch {
                         self.data[pos2] = id;
                         pos2 += 1;
                     }
                     id += 1;
                     let (x2, y2) = pos_to_xy(pos2 - 1);
                     self.blocks.push(Block::new(
-                        BlockType::Other,
+                        BlockType::Other(ch),
                         BlockDir::LeftRight,
                         x,
                         y,
@@ -244,21 +319,28 @@ impl Level {
                         y2,
                     ));
                 }
-                UPDOWN => {
+                ch @ UPDOWN1 | ch @ UPDOWN2 => {
                     let mut pos2 = pos;
-                    while self.data[pos2] == UPDOWN {
+                    while self.data[pos2] == ch {
                         self.data[pos2] = id;
                         pos2 += TILES_WIDE;
                     }
                     id += 1;
                     let (x2, y2) = pos_to_xy(pos2 - 8);
-                    self.blocks
-                        .push(Block::new(BlockType::Other, BlockDir::UpDown, x, y, x2, y2));
+                    self.blocks.push(Block::new(
+                        BlockType::Other(ch),
+                        BlockDir::UpDown,
+                        x,
+                        y,
+                        x2,
+                        y2,
+                    ));
                 }
                 FLOOR => {}
                 _ => {}
             };
         }
+        data
     }
 
     fn serialize(&self) -> [u8; 64] {
@@ -267,11 +349,7 @@ impl Level {
             for x in block.x1..block.x2 + 1 {
                 for y in block.y1..block.y2 + 1 {
                     level[xy_to_pos(x, y)] = match block.r#type {
-                        BlockType::Other => match block.dir {
-                            BlockDir::LeftRight => b'-',
-                            BlockDir::UpDown => b'|',
-                            _ => panic!("Unexpected BlockDir during serialization!"),
-                        },
+                        BlockType::Other(ch) => ch,
                         BlockType::Exit => b'^',
                         BlockType::Player => b'=',
                         BlockType::Wall => b'&',
@@ -458,7 +536,15 @@ impl Level {
 }
 
 fn main() {
-    let mut level = Level::new();
+    let matches = App::new("Unblock")
+        .about("An Unblock Me! clone")
+        .arg(Arg::with_name("dir").long("dir").default_value("."))
+        .get_matches();
+    let mut levels = LevelSet::load(&PathBuf::from(matches.value_of("dir").unwrap()))
+        .unwrap_or_else(|err| {
+            eprintln!("Error loading levels.dat: {}", err);
+            std::process::exit(1);
+        });
     let opengl = OpenGL::V3_2;
     let settings = WindowSettings::new("Unblock Me!", [512; 2])
         .graphics_api(opengl)
@@ -467,20 +553,34 @@ fn main() {
     let mut events = Events::new(EventSettings::new().lazy(true).max_fps(20).ups(10));
     let mut gl = GlGraphics::new(opengl);
     while let Some(e) = events.next(&mut window) {
-        level.event(&e);
+        if let Some(args) = e.press_args() {
+            match args {
+                Button::Keyboard(key) => {
+                    if key == Key::N {
+                        levels.next();
+                    }
+                    if key == Key::P {
+                        levels.previous();
+                    }
+                }
+                _ => {}
+            }
+        }
+        levels.current().event(&e);
         if let Some(args) = e.render_args() {
             gl.draw(args.viewport(), |c, g| {
                 use graphics::clear;
                 clear([0.0; 4], g);
-                level.draw(&c, g);
+                levels.current().draw(&c, g);
             });
         }
     }
-    println!("{}", level.to_string_pretty());
+    println!("{}", levels.current().to_string_pretty());
     println!(
         "{}",
         String::from_utf8(
-            level
+            levels
+                .current()
                 .data
                 .to_vec()
                 .iter()
