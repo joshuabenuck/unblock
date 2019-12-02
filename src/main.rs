@@ -131,11 +131,15 @@ fn xy_to_pos(x: usize, y: usize) -> usize {
 }
 
 fn xy_to_sxy(x: usize, y: usize) -> (usize, usize) {
-    (x * TILE_WIDTH, y * TILE_HEIGHT)
+    let margin_x = (512 - TILE_WIDTH * TILES_WIDE) / 2;
+    let margin_y = (512 - TILE_HEIGHT * TILES_HIGH) / 2;
+    (x * TILE_WIDTH + margin_x, y * TILE_HEIGHT + margin_y)
 }
 
 fn sxy_to_xy(sx: usize, sy: usize) -> (usize, usize) {
-    (sx / TILE_WIDTH, sy / TILE_HEIGHT)
+    let margin_x = (512 - TILE_WIDTH * TILES_WIDE) / 2;
+    let margin_y = (512 - TILE_HEIGHT * TILES_HIGH) / 2;
+    ((sx - margin_x) / TILE_WIDTH, (sy - margin_y) / TILE_HEIGHT)
 }
 
 fn color(block: &Block) -> [f32; 4] {
@@ -155,7 +159,6 @@ struct Level {
     data: [u8; TILES_WIDE * TILES_HIGH],
     blocks: Vec<Block>,
     // UI state
-    mouse_down: bool,
     mouse_pos: (usize, usize),
     drag_origin: Option<(usize, usize)>,
     drag_target: Option<usize>,
@@ -166,7 +169,6 @@ impl Level {
         let mut level = Level {
             data: [FLOOR; TILES_WIDE * TILES_HIGH],
             blocks: Vec::new(),
-            mouse_down: false,
             mouse_pos: (0, 0),
             drag_origin: None,
             drag_target: None,
