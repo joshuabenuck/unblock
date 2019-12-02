@@ -230,12 +230,14 @@ impl LevelSet {
 }
 
 struct Level {
+    template: [u8; TILES_WIDE * TILES_HIGH],
     data: [u8; TILES_WIDE * TILES_HIGH],
     blocks: Vec<Block>,
     // UI state
     mouse_pos: (usize, usize),
     drag_origin: Option<(usize, usize)>,
     drag_target: Option<usize>,
+    solved: bool,
 }
 
 impl Level {
@@ -247,12 +249,20 @@ impl Level {
 
     fn new() -> Level {
         Level {
+            template: [FLOOR; TILES_WIDE * TILES_HIGH],
             data: [FLOOR; TILES_WIDE * TILES_HIGH],
             blocks: Vec::new(),
             mouse_pos: (0, 0),
             drag_origin: None,
             drag_target: None,
+            solved: false,
         }
+    }
+
+    fn reset(&mut self) {
+        self.solved = false;
+        self.blocks = Vec::new();
+        self.parse(&mut self.template.clone().into_iter().map(|b| *b));
     }
 
     fn parse<'a, I: Iterator<Item = u8> + Sized>(&mut self, data: &'a mut I) -> &'a mut I {
@@ -263,13 +273,14 @@ impl Level {
                 None => panic!("Not enough level data"),
             };
             if b != b' ' && b != b'\r' && b != b'\n' {
-                self.data[pos] = b;
+                self.template[pos] = b;
                 pos += 1;
             }
             if pos == 64 {
                 break;
             }
         }
+        self.data = self.template.clone();
         println!("{}", String::from_utf8(self.data.to_vec()).unwrap());
         let mut id = 1;
         assert!(pos == 64, "Corrupt data passed to parse: {}", pos);
@@ -411,6 +422,7 @@ impl Level {
                                         || self.data[xy_to_pos(px, y)]
                                             == self.data[xy_to_pos(x, y)])
                                         && (self.data[xy_to_pos(px + blocks_wide, y)] == FLOOR
+                                            || self.data[xy_to_pos(px + blocks_wide, y)] == EXIT
                                             || self.data[xy_to_pos(px + blocks_wide, y)]
                                                 == self.data[xy_to_pos(x, y)])
                                     {
@@ -484,7 +496,7 @@ impl Level {
                     self.drag_origin = None;
                     for block in self.blocks.iter_mut() {
                         if block.drag {
-                            // Updaate block and data to reflect move.
+                            // Update block and data to reflect move.
                             let id = self.data[xy_to_pos(block.x1, block.y1)];
                             let width = block.x2 - block.x1;
                             let height = block.y2 - block.y1;
@@ -501,6 +513,9 @@ impl Level {
                             block.y2 = block.y1 + height;
                             for x in block.x1..block.x2 + 1 {
                                 for y in block.y1..block.y2 + 1 {
+                                    if self.data[xy_to_pos(x, y)] == EXIT {
+                                        self.solved = true;
+                                    }
                                     self.data[xy_to_pos(x, y)] = id;
                                 }
                             }
@@ -514,7 +529,7 @@ impl Level {
     }
 
     pub fn draw<G: Graphics>(&mut self, c: &Context, g: &mut G) {
-        for block in self.blocks.iter_mut() {
+        for block in self.blocks.iter_mut().rev() {
             let (mut x, mut y) = (block.x1, block.y1);
             let (width, height) = (
                 (1 + block.x2 - block.x1) * TILE_WIDTH,
@@ -526,6 +541,12 @@ impl Level {
             }
             let (sx, sy) = xy_to_sxy(x, y);
             graphics::Rectangle::new(color(block)).draw(
+                [sx as f64, sy as f64, width as f64, height as f64],
+                &c.draw_state,
+                c.transform,
+                g,
+            );
+            graphics::Rectangle::new_border(BLACK, 1.0).draw(
                 [sx as f64, sy as f64, width as f64, height as f64],
                 &c.draw_state,
                 c.transform,
@@ -573,6 +594,10 @@ fn main() {
                 clear([0.0; 4], g);
                 levels.current().draw(&c, g);
             });
+        }
+        if levels.current().solved {
+            levels.current().reset();
+            levels.next();
         }
     }
     println!("{}", levels.current().to_string_pretty());
