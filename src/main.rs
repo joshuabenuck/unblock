@@ -533,6 +533,9 @@ impl State for LevelSet {
         if window.keyboard()[Key::P] == ButtonState::Pressed {
             self.previous();
         }
+        if window.keyboard()[Key::R] == ButtonState::Pressed {
+            self.current().reset();
+        }
         self.current().update(window)?;
         if self.current().solved {
             self.current().reset();
