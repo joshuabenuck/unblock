@@ -333,6 +333,116 @@ impl Level {
         }
         string
     }
+
+    fn drag_to(&mut self, mx: usize, my: usize) {
+        let drag_target = match self.drag_target {
+            Some(dt) => dt,
+            None => return,
+        };
+        let (bx, by) = sxy_to_xy(mx, my);
+        let (ox, oy) = self.drag_origin.unwrap();
+        let (dx, dy): (isize, isize) = (bx as isize - ox as isize, by as isize - oy as isize);
+        let mut block = &mut self.blocks[drag_target];
+        block.target_x = block.x1;
+        block.target_y = block.y1;
+        let (x, y) = (block.x1, block.y1);
+        match block.dir {
+            BlockDir::LeftRight => {
+                let blocks_wide = block.x2 - block.x1;
+                // see if this is a valid move
+                let range: Vec<usize> = if dx > 0 {
+                    (block.x1..block.x1 + dx as usize + 1).collect()
+                } else {
+                    (block.x1 - dx.abs() as usize..block.x1).rev().collect()
+                };
+                for px in range {
+                    if (self.data[xy_to_pos(px, y)] == FLOOR
+                        || self.data[xy_to_pos(px, y)] == EXIT
+                        || self.data[xy_to_pos(px, y)] == self.data[xy_to_pos(x, y)])
+                        && (self.data[xy_to_pos(px + blocks_wide, y)] == FLOOR
+                            || self.data[xy_to_pos(px + blocks_wide, y)] == EXIT
+                            || self.data[xy_to_pos(px + blocks_wide, y)]
+                                == self.data[xy_to_pos(x, y)])
+                    {
+                        block.target_x = px;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            BlockDir::UpDown => {
+                let blocks_high = block.y2 - block.y1;
+                // see if this is a valid move
+                let range: Vec<usize> = if dy > 0 {
+                    (block.y1..block.y1 + dy as usize + 1).collect()
+                } else {
+                    (block.y1 - dy.abs() as usize..block.y1).rev().collect()
+                };
+                for py in range {
+                    if (self.data[xy_to_pos(x, py)] == FLOOR
+                        || self.data[xy_to_pos(x, py)] == self.data[xy_to_pos(x, y)])
+                        && (self.data[xy_to_pos(x, py + blocks_high)] == FLOOR
+                            || self.data[xy_to_pos(x, py + blocks_high)]
+                                == self.data[xy_to_pos(x, y)])
+                    {
+                        block.target_y = py;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ => panic!("Not a valid direction for a draggable block: {:#?}", block),
+        }
+    }
+
+    fn begin_drag(&mut self, mx: usize, my: usize) {
+        let (x, y) = sxy_to_xy(mx, my);
+        self.drag_origin = Some((x, y));
+        for (i, block) in self
+            .blocks
+            .iter_mut()
+            .enumerate()
+            .filter(|(_i, b)| b.dir != BlockDir::Static)
+        {
+            if (block.x1 <= x) && (x <= block.x2) && (block.y1 <= y) && (y <= block.y2) {
+                block.drag = true;
+                self.drag_target = Some(i);
+            }
+        }
+    }
+
+    fn end_drag(&mut self) {
+        self.drag_target = None;
+        self.drag_origin = None;
+        for block in self.blocks.iter_mut() {
+            if block.drag {
+                // Update block and data to reflect move.
+                let id = self.data[xy_to_pos(block.x1, block.y1)];
+                let width = block.x2 - block.x1;
+                let height = block.y2 - block.y1;
+                for x in block.x1..block.x2 + 1 {
+                    for y in block.y1..block.y2 + 1 {
+                        self.data[xy_to_pos(x, y)] = FLOOR;
+                    }
+                }
+                block.x1 = block.target_x;
+                block.y1 = block.target_y;
+                block.target_x = 0;
+                block.target_y = 0;
+                block.x2 = block.x1 + width;
+                block.y2 = block.y1 + height;
+                for x in block.x1..block.x2 + 1 {
+                    for y in block.y1..block.y2 + 1 {
+                        if self.data[xy_to_pos(x, y)] == EXIT {
+                            self.solved = true;
+                        }
+                        self.data[xy_to_pos(x, y)] = id;
+                    }
+                }
+            }
+            block.drag = false;
+        }
+    }
 }
 
 impl State for Level {
@@ -355,118 +465,18 @@ impl State for Level {
             self.mouse_pos = (mouse_pos[0] as usize, mouse_pos[1] as usize);
         }
         if self.drag_origin.is_some() {
-            match self.drag_target {
-                Some(drag_target) => {
-                    // Convert mouse pos to block pos, subtract from original pos to get delta pos.
-                    let (mx, my) = self.mouse_pos;
-                    let (bx, by) = sxy_to_xy(mx, my);
-                    let (ox, oy) = self.drag_origin.unwrap();
-                    let (dx, dy): (isize, isize) =
-                        (bx as isize - ox as isize, by as isize - oy as isize);
-                    let mut block = &mut self.blocks[drag_target];
-                    block.target_x = block.x1;
-                    block.target_y = block.y1;
-                    let (x, y) = (block.x1, block.y1);
-                    match block.dir {
-                        BlockDir::LeftRight => {
-                            let blocks_wide = block.x2 - block.x1;
-                            // see if this is a valid move
-                            let range: Vec<usize> = if dx > 0 {
-                                (block.x1..block.x1 + dx as usize + 1).collect()
-                            } else {
-                                (block.x1 - dx.abs() as usize..block.x1).rev().collect()
-                            };
-                            for px in range {
-                                if (self.data[xy_to_pos(px, y)] == FLOOR
-                                    || self.data[xy_to_pos(px, y)] == EXIT
-                                    || self.data[xy_to_pos(px, y)] == self.data[xy_to_pos(x, y)])
-                                    && (self.data[xy_to_pos(px + blocks_wide, y)] == FLOOR
-                                        || self.data[xy_to_pos(px + blocks_wide, y)] == EXIT
-                                        || self.data[xy_to_pos(px + blocks_wide, y)]
-                                            == self.data[xy_to_pos(x, y)])
-                                {
-                                    block.target_x = px;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                        BlockDir::UpDown => {
-                            let blocks_high = block.y2 - block.y1;
-                            // see if this is a valid move
-                            let range: Vec<usize> = if dy > 0 {
-                                (block.y1..block.y1 + dy as usize + 1).collect()
-                            } else {
-                                (block.y1 - dy.abs() as usize..block.y1).rev().collect()
-                            };
-                            for py in range {
-                                if (self.data[xy_to_pos(x, py)] == FLOOR
-                                    || self.data[xy_to_pos(x, py)] == self.data[xy_to_pos(x, y)])
-                                    && (self.data[xy_to_pos(x, py + blocks_high)] == FLOOR
-                                        || self.data[xy_to_pos(x, py + blocks_high)]
-                                            == self.data[xy_to_pos(x, y)])
-                                {
-                                    block.target_y = py;
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                        _ => panic!("Not a valid direction for a draggable block: {:#?}", block),
-                    }
-                }
-                None => (),
-            };
+            // Convert mouse pos to block pos, subtract from original pos to get delta pos.
+            let (mx, my) = self.mouse_pos;
+            self.drag_to(mx, my);
         }
 
         if window.mouse()[MouseButton::Left] == ButtonState::Pressed && self.drag_target.is_none() {
             let (mx, my) = self.mouse_pos;
-            let (x, y) = sxy_to_xy(mx, my);
-            self.drag_origin = Some((x, y));
-            for (i, block) in self
-                .blocks
-                .iter_mut()
-                .enumerate()
-                .filter(|(_i, b)| b.dir != BlockDir::Static)
-            {
-                if (block.x1 <= x) && (x <= block.x2) && (block.y1 <= y) && (y <= block.y2) {
-                    block.drag = true;
-                    self.drag_target = Some(i);
-                }
-            }
+            self.begin_drag(mx, my);
         }
         if window.mouse()[MouseButton::Left] == ButtonState::Released && self.drag_target.is_some()
         {
-            self.drag_target = None;
-            self.drag_origin = None;
-            for block in self.blocks.iter_mut() {
-                if block.drag {
-                    // Update block and data to reflect move.
-                    let id = self.data[xy_to_pos(block.x1, block.y1)];
-                    let width = block.x2 - block.x1;
-                    let height = block.y2 - block.y1;
-                    for x in block.x1..block.x2 + 1 {
-                        for y in block.y1..block.y2 + 1 {
-                            self.data[xy_to_pos(x, y)] = FLOOR;
-                        }
-                    }
-                    block.x1 = block.target_x;
-                    block.y1 = block.target_y;
-                    block.target_x = 0;
-                    block.target_y = 0;
-                    block.x2 = block.x1 + width;
-                    block.y2 = block.y1 + height;
-                    for x in block.x1..block.x2 + 1 {
-                        for y in block.y1..block.y2 + 1 {
-                            if self.data[xy_to_pos(x, y)] == EXIT {
-                                self.solved = true;
-                            }
-                            self.data[xy_to_pos(x, y)] = id;
-                        }
-                    }
-                }
-                block.drag = false;
-            }
+            self.end_drag();
         }
         Ok(())
     }
