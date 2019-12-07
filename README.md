@@ -8,6 +8,8 @@ The game can only be controlled with the mouse and does not work on mobile devic
 
 Written in Rust and compiled to Web Assembly, the game only needs a capable web browser. There are no server side components.
 
+![Screenshot](screenshot.png)
+
 Keybindings:
 * `r` - Reset the current level
 * `n` - Skip to the next level
