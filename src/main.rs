@@ -1,20 +1,20 @@
 /*
 Add undo: Build stack of moves
-Add reset
 */
-use clap::{App, Arg};
-use failure::Error;
+
+use gate::renderer::{Affine, Renderer};
+use gate::{App, AppContext, AppInfo, KeyCode};
 use itertools::put_back;
-use quicksilver::{
-    geom::{Circle, Line, Rectangle, Transform, Triangle, Vector},
-    graphics::{Background::Col, Color},
-    input::{ButtonState, Key, MouseButton},
-    lifecycle::{run_with, Settings, State, Window},
-    Result,
-};
-use std::fs;
-use std::io::Read;
-use std::path::PathBuf;
+
+mod asset_id {
+    include!(concat!(env!("OUT_DIR"), "/asset_id.rs"));
+}
+use crate::asset_id::{AssetId, SpriteId};
+
+#[cfg(target_arch = "wasm32")]
+gate::gate_header!();
+
+const BLACK: (u8, u8, u8) = (0, 0, 0);
 
 const TILES_WIDE: usize = 8;
 const TILES_HIGH: usize = 8;
@@ -45,7 +45,6 @@ enum BlockType {
     Exit,
 }
 
-#[derive(Debug)]
 struct Block {
     dir: BlockDir,
     r#type: BlockType,
@@ -56,10 +55,19 @@ struct Block {
     drag: bool,
     target_x: usize,
     target_y: usize,
+    sprite: SpriteId,
 }
 
 impl Block {
-    fn new(r#type: BlockType, dir: BlockDir, x1: usize, y1: usize, x2: usize, y2: usize) -> Block {
+    fn new(
+        r#type: BlockType,
+        dir: BlockDir,
+        x1: usize,
+        y1: usize,
+        x2: usize,
+        y2: usize,
+        sprite: SpriteId,
+    ) -> Block {
         Block {
             r#type,
             dir,
@@ -67,6 +75,7 @@ impl Block {
             y1,
             x2,
             y2,
+            sprite,
             ..Default::default()
         }
     }
@@ -84,6 +93,7 @@ impl Default for Block {
             drag: false,
             target_x: 0,
             target_y: 0,
+            sprite: SpriteId::Wall,
         }
     }
 }
@@ -99,28 +109,15 @@ fn xy_to_pos(x: usize, y: usize) -> usize {
 }
 
 fn xy_to_sxy(x: usize, y: usize) -> (usize, usize) {
-    let margin_x = (512 - TILE_WIDTH * TILES_WIDE) / 2;
-    let margin_y = (512 - TILE_HEIGHT * TILES_HIGH) / 2;
+    let margin_x = (800 - TILE_WIDTH * TILES_WIDE) / 2;
+    let margin_y = (600 - TILE_HEIGHT * TILES_HIGH) / 2;
     (x * TILE_WIDTH + margin_x, y * TILE_HEIGHT + margin_y)
 }
 
 fn sxy_to_xy(sx: usize, sy: usize) -> (usize, usize) {
-    let margin_x = (512 - TILE_WIDTH * TILES_WIDE) / 2;
-    let margin_y = (512 - TILE_HEIGHT * TILES_HIGH) / 2;
+    let margin_x = (800 - TILE_WIDTH * TILES_WIDE) / 2;
+    let margin_y = (600 - TILE_HEIGHT * TILES_HIGH) / 2;
     ((sx - margin_x) / TILE_WIDTH, (sy - margin_y) / TILE_HEIGHT)
-}
-
-fn color(block: &Block) -> Color {
-    match block.r#type {
-        BlockType::Player => Color::RED,
-        BlockType::Wall => Color::WHITE,
-        BlockType::Exit => Color::YELLOW,
-        BlockType::Other(_) => match block.dir {
-            BlockDir::LeftRight => Color::BLUE,
-            BlockDir::UpDown => Color::GREEN,
-            _ => panic!("No Static + Other blocks exist"),
-        },
-    }
 }
 
 struct LevelSet {
@@ -129,7 +126,7 @@ struct LevelSet {
 }
 
 impl LevelSet {
-    fn load() -> Result<LevelSet> {
+    fn load() -> LevelSet {
         let data = include_bytes!("../levels.dat");
         //fs::File::open(path.join("levels.dat"))?.read_to_end(&mut data)?;
         let mut levels = Vec::new();
@@ -168,7 +165,7 @@ impl LevelSet {
             // Load level data.
             levels.push(Level::from(&mut data));
         }
-        Ok(LevelSet { levels, current: 0 })
+        LevelSet { levels, current: 0 }
     }
 
     fn current(&mut self) -> &mut Level {
@@ -200,8 +197,19 @@ struct Level {
 }
 
 impl Level {
+    fn new() -> Level {
+        Level {
+            template: [FLOOR; TILES_WIDE * TILES_HIGH],
+            data: [FLOOR; TILES_WIDE * TILES_HIGH],
+            blocks: Vec::new(),
+            mouse_pos: (0, 0),
+            drag_origin: None,
+            drag_target: None,
+            solved: false,
+        }
+    }
     fn from<I: Iterator<Item = u8> + Sized>(data: &mut I) -> Level {
-        let mut level = Level::new().unwrap();
+        let mut level = Level::new();
         level.parse(data);
         level
     }
@@ -235,8 +243,15 @@ impl Level {
             let (x, y) = pos_to_xy(pos);
             match self.data[pos] {
                 WALL => {
-                    self.blocks
-                        .push(Block::new(BlockType::Wall, BlockDir::Static, x, y, x, y));
+                    self.blocks.push(Block::new(
+                        BlockType::Wall,
+                        BlockDir::Static,
+                        x,
+                        y,
+                        x,
+                        y,
+                        SpriteId::Wall,
+                    ));
                 }
                 ch @ LEFTRIGHT1 | ch @ LEFTRIGHT2 => {
                     let mut pos2 = pos.clone();
@@ -246,6 +261,11 @@ impl Level {
                     }
                     id += 1;
                     let (x2, y2) = pos_to_xy(pos2 - 1);
+                    let sprite = match x2 - x {
+                        1 => SpriteId::Horiz2,
+                        2 => SpriteId::Horiz3,
+                        _ => panic!("Unsupported horizontal block width: {}", 1 + x2 - x),
+                    };
                     self.blocks.push(Block::new(
                         BlockType::Other(ch),
                         BlockDir::LeftRight,
@@ -253,11 +273,19 @@ impl Level {
                         y,
                         x2,
                         y2,
+                        sprite,
                     ));
                 }
                 EXIT => {
-                    self.blocks
-                        .push(Block::new(BlockType::Exit, BlockDir::Static, x, y, x, y));
+                    self.blocks.push(Block::new(
+                        BlockType::Exit,
+                        BlockDir::Static,
+                        x,
+                        y,
+                        x,
+                        y,
+                        SpriteId::Exit,
+                    ));
                 }
                 PLAYER => {
                     let mut pos2 = pos;
@@ -267,6 +295,10 @@ impl Level {
                     }
                     id += 1;
                     let (x2, y2) = pos_to_xy(pos2 - 1);
+                    let sprite = match x2 - x {
+                        1 => SpriteId::Player,
+                        _ => panic!("Unsupported player block width: {}", 1 + x2 - x),
+                    };
                     self.blocks.push(Block::new(
                         BlockType::Player,
                         BlockDir::LeftRight,
@@ -274,6 +306,7 @@ impl Level {
                         y,
                         x2,
                         y2,
+                        sprite,
                     ));
                 }
                 ch @ UPDOWN1 | ch @ UPDOWN2 => {
@@ -284,6 +317,11 @@ impl Level {
                     }
                     id += 1;
                     let (x2, y2) = pos_to_xy(pos2 - 8);
+                    let sprite = match y2 - y {
+                        1 => SpriteId::Vert2,
+                        2 => SpriteId::Vert3,
+                        _ => panic!("Unsupported vertical block height: {}", 1 + y2 - y),
+                    };
                     self.blocks.push(Block::new(
                         BlockType::Other(ch),
                         BlockDir::UpDown,
@@ -291,6 +329,7 @@ impl Level {
                         y,
                         x2,
                         y2,
+                        sprite,
                     ));
                 }
                 FLOOR => {}
@@ -391,7 +430,10 @@ impl Level {
                     }
                 }
             }
-            _ => panic!("Not a valid direction for a draggable block: {:#?}", block),
+            _ => panic!(
+                "Not a valid direction for a draggable block: {:#?}",
+                block.r#type
+            ),
         }
     }
 
@@ -445,135 +487,118 @@ impl Level {
     }
 }
 
-impl State for Level {
-    fn new() -> Result<Level> {
-        Ok(Level {
-            template: [FLOOR; TILES_WIDE * TILES_HIGH],
-            data: [FLOOR; TILES_WIDE * TILES_HIGH],
-            blocks: Vec::new(),
-            mouse_pos: (0, 0),
-            drag_origin: None,
-            drag_target: None,
-            solved: false,
-        })
-    }
+impl App<AssetId> for Level {
+    /// Invoked when the application is first started, default behavior is a no-op.
+    fn start(&mut self, _ctx: &mut AppContext<AssetId>) {}
 
-    fn update(&mut self, window: &mut Window) -> Result<()> {
-        let mouse_pos = window.mouse().pos().into_point();
+    /// Advances the app state by a given amount of `seconds` (usually a fraction of a second).
+    fn advance(&mut self, _seconds: f64, ctx: &mut AppContext<AssetId>) {
+        let mut mouse_pos = ctx.cursor();
+        mouse_pos.1 = 600. - mouse_pos.1;
+        //println!("mouse pos: {} {}", mouse_pos.0, mouse_pos.1);
         // TODO: Stop using usize to for mouse_pos...
-        if mouse_pos[0] > 0.0 && mouse_pos[1] > 0.0 {
-            self.mouse_pos = (mouse_pos[0] as usize, mouse_pos[1] as usize);
+        let margin_x = (800 - TILE_WIDTH * TILES_WIDE) / 2;
+        let margin_y = (600 - TILE_HEIGHT * TILES_HIGH) / 2;
+        if mouse_pos.0 > margin_x as f64 && mouse_pos.1 > margin_y as f64 {
+            self.mouse_pos = (mouse_pos.0 as usize, mouse_pos.1 as usize);
         }
         if self.drag_origin.is_some() {
             // Convert mouse pos to block pos, subtract from original pos to get delta pos.
             let (mx, my) = self.mouse_pos;
             self.drag_to(mx, my);
         }
-
-        if window.mouse()[MouseButton::Left] == ButtonState::Pressed && self.drag_target.is_none() {
-            let (mx, my) = self.mouse_pos;
-            self.begin_drag(mx, my);
-        }
-        if window.mouse()[MouseButton::Left] == ButtonState::Released && self.drag_target.is_some()
-        {
-            self.end_drag();
-        }
-        Ok(())
     }
 
-    fn draw(&mut self, window: &mut Window) -> Result<()> {
+    /// Invoked when a key or mouse button is pressed down.
+    fn key_down(&mut self, key: KeyCode, _ctx: &mut AppContext<AssetId>) {
+        if key == KeyCode::MouseLeft {
+            let (mx, my) = self.mouse_pos;
+            let (gx, gy) = sxy_to_xy(mx, my);
+            println!("mouse: {} {}; grid: {} {}", mx, my, gx, gy);
+        }
+        if key == KeyCode::MouseLeft && self.drag_target.is_none() {
+            let (mx, my) = self.mouse_pos;
+            println!("mouse down: {} {}", mx, my);
+            self.begin_drag(mx, my);
+        }
+    }
+
+    /// Invoked when a key or mouse button is released, default behavior is a no-op.
+    fn key_up(&mut self, key: KeyCode, _ctx: &mut AppContext<AssetId>) {
+        if key == KeyCode::MouseLeft && self.drag_target.is_some() {
+            println!("mouse up");
+            self.end_drag();
+        }
+    }
+
+    /// Render the app in its current state.
+    fn render(&mut self, renderer: &mut Renderer<AssetId>, _ctx: &AppContext<AssetId>) {
+        let mut renderer = renderer.sprite_mode();
         for block in self.blocks.iter_mut().rev() {
             let (mut x, mut y) = (block.x1, block.y1);
-            let (width, height) = (
-                (1 + block.x2 - block.x1) * TILE_WIDTH,
-                (1 + block.y2 - block.y1) * TILE_HEIGHT,
-            );
             if block.drag && block.target_x != 0 && block.target_y != 0 {
                 x = block.target_x;
                 y = block.target_y;
             }
             let (sx, sy) = xy_to_sxy(x, y);
-            window.draw(
-                &Rectangle::new((sx as f32, sy as f32), (width as f32, height as f32)),
-                Col(color(block)),
-            );
-            // Top
-            window.draw(
-                &Line::new((sx as f32, sy as f32), ((sx + width) as f32, sy as f32)),
-                Col(Color::BLACK),
-            );
-            // Left
-            window.draw(
-                &Line::new((sx as f32, sy as f32), (sx as f32, (sy + height) as f32)),
-                Col(Color::BLACK),
-            );
-            // Right
-            window.draw(
-                &Line::new(
-                    ((sx + width) as f32, sy as f32),
-                    ((sx + width) as f32, (sy + height) as f32),
-                ),
-                Col(Color::BLACK),
-            );
-            // Bottom
-            window.draw(
-                &Line::new(
-                    (sx as f32, (sy + height) as f32),
-                    ((sx + width) as f32, (sy + height) as f32),
-                ),
-                Col(Color::BLACK),
+            let width = (1 + block.x2 - block.x1) * TILE_WIDTH / 2;
+            let height = (1 + block.y2 - block.y1) * TILE_HEIGHT / 2;
+            renderer.draw(
+                &Affine::translate((sx + width) as f64, 600. - (sy + height) as f64),
+                block.sprite,
             );
         }
-        Ok(())
     }
 }
 
-impl State for LevelSet {
-    fn new() -> Result<LevelSet> {
-        Ok(LevelSet {
+impl LevelSet {
+    fn new() -> LevelSet {
+        LevelSet {
             levels: Vec::new(),
             current: 0,
-        })
+        }
     }
+}
 
-    fn update(&mut self, window: &mut Window) -> Result<()> {
-        if window.keyboard()[Key::N] == ButtonState::Pressed {
+impl App<AssetId> for LevelSet {
+    fn key_down(&mut self, key: KeyCode, ctx: &mut AppContext<AssetId>) {
+        if key == KeyCode::N {
             self.next();
         }
-        if window.keyboard()[Key::P] == ButtonState::Pressed {
+        if key == KeyCode::P {
             self.previous();
         }
-        if window.keyboard()[Key::R] == ButtonState::Pressed {
+        if key == KeyCode::R {
             self.current().reset();
         }
-        self.current().update(window)?;
+        self.current().key_down(key, ctx);
+    }
+
+    fn key_up(&mut self, key: KeyCode, ctx: &mut AppContext<AssetId>) {
+        self.current().key_up(key, ctx);
+    }
+
+    fn advance(&mut self, seconds: f64, ctx: &mut AppContext<AssetId>) {
+        self.current().advance(seconds, ctx);
         if self.current().solved {
             self.current().reset();
             self.next();
         }
-        self.current().update(window)?;
-        Ok(())
     }
 
-    fn draw(&mut self, window: &mut Window) -> Result<()> {
-        window.clear(Color::BLACK)?;
-        self.current().draw(window)?;
-        Ok(())
+    fn render(&mut self, renderer: &mut Renderer<AssetId>, ctx: &AppContext<AssetId>) {
+        renderer.clear(BLACK);
+        self.current().render(renderer, ctx);
     }
 }
 
 fn main() {
-    let levels = LevelSet::load().unwrap_or_else(|err| {
-        eprintln!("Error loading levels.dat: {}", err);
-        std::process::exit(1);
-    });
-    let mut settings = Settings::default();
-    settings.update_rate = 100.0;
-    settings.draw_rate = 50.0;
-    run_with(
-        "Unblock Me!",
-        Vector::new(512, 512),
-        Settings::default(),
-        || Ok(levels),
-    );
+    #[cfg(target_os = "windows")]
+    sdl2::hint::set("SDL_RENDER_DRIVER", "opengles2");
+    let levels = LevelSet::load();
+    let info = AppInfo::with_max_dims(800., 600.)
+        .min_dims(800., 600.)
+        .tile_width(50)
+        .title("Unblock Me!");
+    gate::run(info, levels);
 }
