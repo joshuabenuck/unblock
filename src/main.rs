@@ -108,18 +108,6 @@ fn xy_to_pos(x: usize, y: usize) -> usize {
     x + y * 8
 }
 
-fn xy_to_sxy(x: usize, y: usize) -> (usize, usize) {
-    let margin_x = (800 - TILE_WIDTH * TILES_WIDE) / 2;
-    let margin_y = (600 - TILE_HEIGHT * TILES_HIGH) / 2;
-    (x * TILE_WIDTH + margin_x, y * TILE_HEIGHT + margin_y)
-}
-
-fn sxy_to_xy(sx: usize, sy: usize) -> (usize, usize) {
-    let margin_x = (800 - TILE_WIDTH * TILES_WIDE) / 2;
-    let margin_y = (600 - TILE_HEIGHT * TILES_HIGH) / 2;
-    ((sx - margin_x) / TILE_WIDTH, (sy - margin_y) / TILE_HEIGHT)
-}
-
 struct LevelSet {
     levels: Vec<Level>,
     current: usize,
@@ -185,6 +173,12 @@ impl LevelSet {
     }
 }
 
+struct Move {
+    block: usize,
+    x: usize,
+    y: usize,
+}
+
 struct Level {
     template: [u8; TILES_WIDE * TILES_HIGH],
     data: [u8; TILES_WIDE * TILES_HIGH],
@@ -194,6 +188,15 @@ struct Level {
     drag_origin: Option<(usize, usize)>,
     drag_target: Option<usize>,
     solved: bool,
+    width: usize,
+    height: usize,
+    moves: Vec<Move>,
+}
+
+fn xy_to_sxy(width: usize, height: usize, x: usize, y: usize) -> (usize, usize) {
+    let margin_x = (width - TILE_WIDTH * TILES_WIDE) / 2;
+    let margin_y = (height - TILE_HEIGHT * TILES_HIGH) / 2;
+    (x * TILE_WIDTH + margin_x, y * TILE_HEIGHT + margin_y)
 }
 
 impl Level {
@@ -206,12 +209,22 @@ impl Level {
             drag_origin: None,
             drag_target: None,
             solved: false,
+            width: 800,
+            height: 600,
+            moves: Vec::new(),
         }
     }
+
     fn from<I: Iterator<Item = u8> + Sized>(data: &mut I) -> Level {
         let mut level = Level::new();
         level.parse(data);
         level
+    }
+
+    fn sxy_to_xy(&self, sx: usize, sy: usize) -> (usize, usize) {
+        let margin_x = (self.width - TILE_WIDTH * TILES_WIDE) / 2;
+        let margin_y = (self.height - TILE_HEIGHT * TILES_HIGH) / 2;
+        ((sx - margin_x) / TILE_WIDTH, (sy - margin_y) / TILE_HEIGHT)
     }
 
     fn reset(&mut self) {
@@ -378,7 +391,7 @@ impl Level {
             Some(dt) => dt,
             None => return,
         };
-        let (bx, by) = sxy_to_xy(mx, my);
+        let (bx, by) = self.sxy_to_xy(mx, my);
         let (ox, oy) = self.drag_origin.unwrap();
         let (dx, dy): (isize, isize) = (bx as isize - ox as isize, by as isize - oy as isize);
         let mut block = &mut self.blocks[drag_target];
@@ -438,8 +451,10 @@ impl Level {
     }
 
     fn begin_drag(&mut self, mx: usize, my: usize) {
-        let (x, y) = sxy_to_xy(mx, my);
+        let (x, y) = self.sxy_to_xy(mx, my);
         self.drag_origin = Some((x, y));
+        let width = self.width;
+        let height = self.height;
         for (i, block) in self
             .blocks
             .iter_mut()
@@ -449,15 +464,37 @@ impl Level {
             if (block.x1 <= x) && (x <= block.x2) && (block.y1 <= y) && (y <= block.y2) {
                 block.drag = true;
                 self.drag_target = Some(i);
+                return;
+            }
+        }
+
+        // Look for less than perfect hits to attempt touch support
+        for (i, block) in self
+            .blocks
+            .iter_mut()
+            .enumerate()
+            .filter(|(_i, b)| b.dir != BlockDir::Static)
+        {
+            let (sx1, sy1) = xy_to_sxy(width, height, block.x1, block.y1);
+            let (sx2, sy2) = xy_to_sxy(width, height, block.x2 + 1, block.y2 + 1);
+            if (sx1 - 10 <= mx) && (mx <= sx2 + 10) && (sy1 - 10 <= my) && (my <= sy2 + 10) {
+                block.drag = true;
+                self.drag_target = Some(i);
+                return;
             }
         }
     }
 
     fn end_drag(&mut self) {
-        self.drag_target = None;
-        self.drag_origin = None;
-        for block in self.blocks.iter_mut() {
+        for (i, block) in self.blocks.iter_mut().enumerate() {
             if block.drag {
+                if self.drag_target.is_some() {
+                    self.moves.push(Move {
+                        block: i,
+                        x: block.x1,
+                        y: block.y1,
+                    })
+                }
                 // Update block and data to reflect move.
                 let id = self.data[xy_to_pos(block.x1, block.y1)];
                 let width = block.x2 - block.x1;
@@ -484,6 +521,8 @@ impl Level {
             }
             block.drag = false;
         }
+        self.drag_target = None;
+        self.drag_origin = None;
     }
 }
 
@@ -493,6 +532,9 @@ impl App<AssetId> for Level {
 
     /// Advances the app state by a given amount of `seconds` (usually a fraction of a second).
     fn advance(&mut self, _seconds: f64, ctx: &mut AppContext<AssetId>) {
+        let dims = ctx.dims();
+        self.width = dims.0 as usize;
+        self.height = dims.1 as usize;
         let mut mouse_pos = ctx.cursor();
         mouse_pos.1 = 600. - mouse_pos.1;
         //println!("mouse pos: {} {}", mouse_pos.0, mouse_pos.1);
@@ -513,13 +555,23 @@ impl App<AssetId> for Level {
     fn key_down(&mut self, key: KeyCode, _ctx: &mut AppContext<AssetId>) {
         if key == KeyCode::MouseLeft {
             let (mx, my) = self.mouse_pos;
-            let (gx, gy) = sxy_to_xy(mx, my);
+            let (gx, gy) = self.sxy_to_xy(mx, my);
             println!("mouse: {} {}; grid: {} {}", mx, my, gx, gy);
         }
         if key == KeyCode::MouseLeft && self.drag_target.is_none() {
             let (mx, my) = self.mouse_pos;
             println!("mouse down: {} {}", mx, my);
             self.begin_drag(mx, my);
+        }
+        if key == KeyCode::U {
+            let move_to_undo = self.moves.pop();
+            if move_to_undo.is_some() {
+                let undo = move_to_undo.unwrap();
+                self.blocks[undo.block].target_x = undo.x;
+                self.blocks[undo.block].target_y = undo.y;
+                self.blocks[undo.block].drag = true;
+                self.end_drag();
+            }
         }
     }
 
@@ -534,28 +586,19 @@ impl App<AssetId> for Level {
     /// Render the app in its current state.
     fn render(&mut self, renderer: &mut Renderer<AssetId>, _ctx: &AppContext<AssetId>) {
         let mut renderer = renderer.sprite_mode();
-        for block in self.blocks.iter_mut().rev() {
+        for block in { self.blocks.iter_mut().rev() } {
             let (mut x, mut y) = (block.x1, block.y1);
             if block.drag && block.target_x != 0 && block.target_y != 0 {
                 x = block.target_x;
                 y = block.target_y;
             }
-            let (sx, sy) = xy_to_sxy(x, y);
+            let (sx, sy) = xy_to_sxy(self.width, self.height, x, y);
             let width = (1 + block.x2 - block.x1) * TILE_WIDTH / 2;
             let height = (1 + block.y2 - block.y1) * TILE_HEIGHT / 2;
             renderer.draw(
                 &Affine::translate((sx + width) as f64, 600. - (sy + height) as f64),
                 block.sprite,
             );
-        }
-    }
-}
-
-impl LevelSet {
-    fn new() -> LevelSet {
-        LevelSet {
-            levels: Vec::new(),
-            current: 0,
         }
     }
 }
@@ -597,7 +640,7 @@ fn main() {
     sdl2::hint::set("SDL_RENDER_DRIVER", "opengles2");
     let levels = LevelSet::load();
     let info = AppInfo::with_max_dims(800., 600.)
-        .min_dims(800., 600.)
+        .min_dims(500., 500.)
         .tile_width(50)
         .title("Unblock Me!");
     gate::run(info, levels);
