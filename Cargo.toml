@@ -10,10 +10,4 @@ edition = "2018"
 failure = "0.1.6"
 clap = "2.33.0"
 itertools = "0.8.2"
-gate = "0.6.2"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-sdl2 = "*"
-
-[build-dependencies]
-gate_build = "0.6.2"
+coffee = { version = "0.3.2", features = ["vulkan"] }

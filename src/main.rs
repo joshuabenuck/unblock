@@ -2,19 +2,42 @@
 Add undo: Build stack of moves
 */
 
-use gate::renderer::{Affine, Renderer};
-use gate::{App, AppContext, AppInfo, KeyCode};
+use coffee::{
+    graphics::{Color, Frame, Mesh, Point, Rectangle, Shape, Window, WindowSettings},
+    input::{keyboard, keyboard::KeyCode, mouse, ButtonState, Event, Input, KeyboardAndMouse},
+    load::Task,
+    Game, Result, Timer,
+};
 use itertools::put_back;
+use std::collections::HashSet;
 
-mod asset_id {
-    include!(concat!(env!("OUT_DIR"), "/asset_id.rs"));
-}
-use crate::asset_id::{AssetId, SpriteId};
+const YELLOW: Color = Color {
+    r: 1.0,
+    g: 1.0,
+    b: 0.0,
+    a: 1.0,
+};
 
-#[cfg(target_arch = "wasm32")]
-gate::gate_header!();
+const RED: Color = Color {
+    r: 1.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
 
-const BLACK: (u8, u8, u8) = (0, 0, 0);
+const BLUE: Color = Color {
+    r: 0.0,
+    g: 0.0,
+    b: 1.0,
+    a: 1.0,
+};
+
+const GREEN: Color = Color {
+    r: 0.0,
+    g: 1.0,
+    b: 0.0,
+    a: 1.0,
+};
 
 const TILES_WIDE: usize = 8;
 const TILES_HIGH: usize = 8;
@@ -55,19 +78,10 @@ struct Block {
     drag: bool,
     target_x: usize,
     target_y: usize,
-    sprite: SpriteId,
 }
 
 impl Block {
-    fn new(
-        r#type: BlockType,
-        dir: BlockDir,
-        x1: usize,
-        y1: usize,
-        x2: usize,
-        y2: usize,
-        sprite: SpriteId,
-    ) -> Block {
+    fn new(r#type: BlockType, dir: BlockDir, x1: usize, y1: usize, x2: usize, y2: usize) -> Block {
         Block {
             r#type,
             dir,
@@ -75,7 +89,6 @@ impl Block {
             y1,
             x2,
             y2,
-            sprite,
             ..Default::default()
         }
     }
@@ -93,7 +106,6 @@ impl Default for Block {
             drag: false,
             target_x: 0,
             target_y: 0,
-            sprite: SpriteId::Wall,
         }
     }
 }
@@ -106,6 +118,19 @@ fn pos_to_xy(pos: usize) -> (usize, usize) {
 
 fn xy_to_pos(x: usize, y: usize) -> usize {
     x + y * 8
+}
+
+fn color(block: &Block) -> Color {
+    match block.r#type {
+        BlockType::Player => RED,
+        BlockType::Wall => Color::WHITE,
+        BlockType::Exit => YELLOW,
+        BlockType::Other(_) => match block.dir {
+            BlockDir::LeftRight => BLUE,
+            BlockDir::UpDown => GREEN,
+            _ => panic!("No Static + Other blocks exist"),
+        },
+    }
 }
 
 struct LevelSet {
@@ -209,8 +234,8 @@ impl Level {
             drag_origin: None,
             drag_target: None,
             solved: false,
-            width: 800,
-            height: 600,
+            width: 500,
+            height: 500,
             moves: Vec::new(),
         }
     }
@@ -256,15 +281,8 @@ impl Level {
             let (x, y) = pos_to_xy(pos);
             match self.data[pos] {
                 WALL => {
-                    self.blocks.push(Block::new(
-                        BlockType::Wall,
-                        BlockDir::Static,
-                        x,
-                        y,
-                        x,
-                        y,
-                        SpriteId::Wall,
-                    ));
+                    self.blocks
+                        .push(Block::new(BlockType::Wall, BlockDir::Static, x, y, x, y));
                 }
                 ch @ LEFTRIGHT1 | ch @ LEFTRIGHT2 => {
                     let mut pos2 = pos.clone();
@@ -274,11 +292,6 @@ impl Level {
                     }
                     id += 1;
                     let (x2, y2) = pos_to_xy(pos2 - 1);
-                    let sprite = match x2 - x {
-                        1 => SpriteId::Horiz2,
-                        2 => SpriteId::Horiz3,
-                        _ => panic!("Unsupported horizontal block width: {}", 1 + x2 - x),
-                    };
                     self.blocks.push(Block::new(
                         BlockType::Other(ch),
                         BlockDir::LeftRight,
@@ -286,19 +299,11 @@ impl Level {
                         y,
                         x2,
                         y2,
-                        sprite,
                     ));
                 }
                 EXIT => {
-                    self.blocks.push(Block::new(
-                        BlockType::Exit,
-                        BlockDir::Static,
-                        x,
-                        y,
-                        x,
-                        y,
-                        SpriteId::Exit,
-                    ));
+                    self.blocks
+                        .push(Block::new(BlockType::Exit, BlockDir::Static, x, y, x, y));
                 }
                 PLAYER => {
                     let mut pos2 = pos;
@@ -308,10 +313,6 @@ impl Level {
                     }
                     id += 1;
                     let (x2, y2) = pos_to_xy(pos2 - 1);
-                    let sprite = match x2 - x {
-                        1 => SpriteId::Player,
-                        _ => panic!("Unsupported player block width: {}", 1 + x2 - x),
-                    };
                     self.blocks.push(Block::new(
                         BlockType::Player,
                         BlockDir::LeftRight,
@@ -319,7 +320,6 @@ impl Level {
                         y,
                         x2,
                         y2,
-                        sprite,
                     ));
                 }
                 ch @ UPDOWN1 | ch @ UPDOWN2 => {
@@ -330,11 +330,6 @@ impl Level {
                     }
                     id += 1;
                     let (x2, y2) = pos_to_xy(pos2 - 8);
-                    let sprite = match y2 - y {
-                        1 => SpriteId::Vert2,
-                        2 => SpriteId::Vert3,
-                        _ => panic!("Unsupported vertical block height: {}", 1 + y2 - y),
-                    };
                     self.blocks.push(Block::new(
                         BlockType::Other(ch),
                         BlockDir::UpDown,
@@ -342,7 +337,6 @@ impl Level {
                         y,
                         x2,
                         y2,
-                        sprite,
                     ));
                 }
                 FLOOR => {}
@@ -524,26 +518,10 @@ impl Level {
         self.drag_target = None;
         self.drag_origin = None;
     }
-}
 
-impl App<AssetId> for Level {
-    /// Invoked when the application is first started, default behavior is a no-op.
-    fn start(&mut self, _ctx: &mut AppContext<AssetId>) {}
-
-    /// Advances the app state by a given amount of `seconds` (usually a fraction of a second).
-    fn advance(&mut self, _seconds: f64, ctx: &mut AppContext<AssetId>) {
-        let dims = ctx.dims();
-        self.width = dims.0 as usize;
-        self.height = dims.1 as usize;
-        let mut mouse_pos = ctx.cursor();
-        mouse_pos.1 = 600. - mouse_pos.1;
-        //println!("mouse pos: {} {}", mouse_pos.0, mouse_pos.1);
-        // TODO: Stop using usize to for mouse_pos...
-        let margin_x = (800 - TILE_WIDTH * TILES_WIDE) / 2;
-        let margin_y = (600 - TILE_HEIGHT * TILES_HIGH) / 2;
-        if mouse_pos.0 > margin_x as f64 && mouse_pos.1 > margin_y as f64 {
-            self.mouse_pos = (mouse_pos.0 as usize, mouse_pos.1 as usize);
-        }
+    fn update(&mut self, window: &Window) {
+        self.width = window.width() as usize;
+        self.height = window.height() as usize;
         if self.drag_origin.is_some() {
             // Convert mouse pos to block pos, subtract from original pos to get delta pos.
             let (mx, my) = self.mouse_pos;
@@ -551,19 +529,30 @@ impl App<AssetId> for Level {
         }
     }
 
-    /// Invoked when a key or mouse button is pressed down.
-    fn key_down(&mut self, key: KeyCode, _ctx: &mut AppContext<AssetId>) {
-        if key == KeyCode::MouseLeft {
+    fn interact(&mut self, input: &mut UnblockInput, _window: &mut Window) {
+        if input.is_mouse_pressed {
             let (mx, my) = self.mouse_pos;
-            let (gx, gy) = self.sxy_to_xy(mx, my);
+            let (gx, gy) = self.sxy_to_xy(
+                input.cursor_position().coords.x as usize,
+                input.cursor_position().coords.y as usize,
+            );
             println!("mouse: {} {}; grid: {} {}", mx, my, gx, gy);
+            if self.drag_target.is_none() {
+                let (mx, my) = self.mouse_pos;
+                println!("mouse down: {} {}", mx, my);
+                self.begin_drag(mx, my);
+            }
         }
-        if key == KeyCode::MouseLeft && self.drag_target.is_none() {
-            let (mx, my) = self.mouse_pos;
-            println!("mouse down: {} {}", mx, my);
-            self.begin_drag(mx, my);
+        let mouse_pos = input.cursor_position();
+        //mouse_pos.coords.y = 500 - mouse_pos.coords.y;
+        //println!("mouse pos: {} {}", mouse_pos.0, mouse_pos.1);
+        // TODO: Stop using usize to for mouse_pos...
+        let margin_x = (500 - TILE_WIDTH * TILES_WIDE) / 2;
+        let margin_y = (500 - TILE_HEIGHT * TILES_HIGH) / 2;
+        if mouse_pos.coords.x > margin_x as f32 && mouse_pos.coords.y > margin_y as f32 {
+            self.mouse_pos = (mouse_pos.coords.x as usize, mouse_pos.coords.y as usize);
         }
-        if key == KeyCode::U {
+        if input.was_key_released(KeyCode::U) {
             let move_to_undo = self.moves.pop();
             if move_to_undo.is_some() {
                 let undo = move_to_undo.unwrap();
@@ -573,19 +562,15 @@ impl App<AssetId> for Level {
                 self.end_drag();
             }
         }
-    }
 
-    /// Invoked when a key or mouse button is released, default behavior is a no-op.
-    fn key_up(&mut self, key: KeyCode, _ctx: &mut AppContext<AssetId>) {
-        if key == KeyCode::MouseLeft && self.drag_target.is_some() {
+        if !input.is_mouse_pressed && self.drag_target.is_some() {
             println!("mouse up");
             self.end_drag();
         }
     }
 
-    /// Render the app in its current state.
-    fn render(&mut self, renderer: &mut Renderer<AssetId>, _ctx: &AppContext<AssetId>) {
-        let mut renderer = renderer.sprite_mode();
+    fn draw(&mut self, frame: &mut Frame<'_>, _timer: &Timer) {
+        let mut mesh = Mesh::new();
         for block in { self.blocks.iter_mut().rev() } {
             let (mut x, mut y) = (block.x1, block.y1);
             if block.drag && block.target_x != 0 && block.target_y != 0 {
@@ -593,55 +578,199 @@ impl App<AssetId> for Level {
                 y = block.target_y;
             }
             let (sx, sy) = xy_to_sxy(self.width, self.height, x, y);
-            let width = (1 + block.x2 - block.x1) * TILE_WIDTH / 2;
-            let height = (1 + block.y2 - block.y1) * TILE_HEIGHT / 2;
-            renderer.draw(
-                &Affine::translate((sx + width) as f64, 600. - (sy + height) as f64),
-                block.sprite,
+            let width = (1 + block.x2 - block.x1) * TILE_WIDTH;
+            let height = (1 + block.y2 - block.y1) * TILE_HEIGHT;
+            mesh.fill(
+                Shape::Rectangle(Rectangle {
+                    x: sx as f32,
+                    y: sy as f32,
+                    width: width as f32,
+                    height: height as f32,
+                }),
+                color(block),
+            );
+            mesh.stroke(
+                Shape::Rectangle(Rectangle {
+                    x: sx as f32,
+                    y: sy as f32,
+                    width: width as f32,
+                    height: height as f32,
+                }),
+                Color::BLACK,
+                1,
             );
         }
+        mesh.draw(&mut frame.as_target());
     }
 }
 
-impl App<AssetId> for LevelSet {
-    fn key_down(&mut self, key: KeyCode, ctx: &mut AppContext<AssetId>) {
-        if key == KeyCode::N {
+// Copy of KeyboardAndMouse in order to get access to mouse_pressed
+struct UnblockInput {
+    cursor_position: Point,
+    is_cursor_taken: bool,
+    is_mouse_pressed: bool,
+    left_clicks: Vec<Point>,
+    pressed_keys: HashSet<keyboard::KeyCode>,
+    released_keys: HashSet<keyboard::KeyCode>,
+}
+
+impl UnblockInput {
+    /// Returns the current cursor position.
+    pub fn cursor_position(&self) -> Point {
+        self.cursor_position
+    }
+
+    /// Returns true if the cursor is currently not available.
+    ///
+    /// This mostly happens when the cursor is currently over a
+    /// [`UserInterface`].
+    ///
+    /// [`UserInterface`]: ../ui/trait.UserInterface.html
+    pub fn is_cursor_taken(&self) -> bool {
+        self.is_cursor_taken
+    }
+
+    /// Returns the positions of the mouse clicks during the last interaction.
+    ///
+    /// Clicks performed while the mouse cursor is not available are
+    /// automatically ignored.
+    pub fn left_clicks(&self) -> &[Point] {
+        &self.left_clicks
+    }
+
+    /// Returns true if the given key is currently pressed.
+    pub fn is_key_pressed(&self, key_code: keyboard::KeyCode) -> bool {
+        self.pressed_keys.contains(&key_code)
+    }
+
+    /// Returns true if the given key was released during the last interaction.
+    pub fn was_key_released(&self, key_code: keyboard::KeyCode) -> bool {
+        self.released_keys.contains(&key_code)
+    }
+}
+
+impl Input for UnblockInput {
+    fn new() -> UnblockInput {
+        UnblockInput {
+            cursor_position: Point::new(0.0, 0.0),
+            is_cursor_taken: false,
+            is_mouse_pressed: false,
+            left_clicks: Vec::new(),
+            pressed_keys: HashSet::new(),
+            released_keys: HashSet::new(),
+        }
+    }
+
+    fn update(&mut self, event: Event) {
+        match event {
+            Event::Mouse(mouse_event) => match mouse_event {
+                mouse::Event::CursorMoved { x, y } => {
+                    self.cursor_position = Point::new(x, y);
+                }
+                mouse::Event::CursorTaken => {
+                    self.is_cursor_taken = true;
+                }
+                mouse::Event::CursorReturned => {
+                    self.is_cursor_taken = false;
+                }
+                mouse::Event::Input {
+                    button: mouse::Button::Left,
+                    state,
+                } => match state {
+                    ButtonState::Pressed => {
+                        self.is_mouse_pressed = !self.is_cursor_taken;
+                    }
+                    ButtonState::Released => {
+                        if !self.is_cursor_taken && self.is_mouse_pressed {
+                            self.left_clicks.push(self.cursor_position);
+                        }
+
+                        self.is_mouse_pressed = false;
+                    }
+                },
+                mouse::Event::Input { .. } => {
+                    // TODO: Track other buttons!
+                }
+                mouse::Event::CursorEntered => {
+                    // TODO: Track it!
+                }
+                mouse::Event::CursorLeft => {
+                    // TODO: Track it!
+                }
+                mouse::Event::WheelScrolled { .. } => {
+                    // TODO: Track it!
+                }
+            },
+            Event::Keyboard(keyboard_event) => match keyboard_event {
+                keyboard::Event::Input { key_code, state } => {
+                    match state {
+                        ButtonState::Pressed => {
+                            let _ = self.pressed_keys.insert(key_code);
+                        }
+                        ButtonState::Released => {
+                            let _ = self.pressed_keys.remove(&key_code);
+                            let _ = self.released_keys.insert(key_code);
+                        }
+                    };
+                }
+                keyboard::Event::TextEntered { .. } => {}
+            },
+            Event::Gamepad { .. } => {
+                // Ignore gamepad events...
+            }
+            Event::Window(_) => {
+                // Ignore window events...
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.left_clicks.clear();
+        self.released_keys.clear();
+    }
+}
+
+impl Game for LevelSet {
+    type Input = UnblockInput;
+    type LoadingScreen = ();
+    const TICKS_PER_SECOND: u16 = 20;
+
+    fn load(_window: &Window) -> Task<LevelSet> {
+        Task::new(|| LevelSet::load())
+    }
+
+    fn draw(&mut self, frame: &mut Frame<'_>, timer: &Timer) {
+        frame.clear(Color::BLACK);
+        self.current().draw(frame, timer);
+    }
+
+    fn interact(&mut self, input: &mut Self::Input, _window: &mut Window) {
+        if input.was_key_released(KeyCode::N) {
             self.next();
         }
-        if key == KeyCode::P {
+        if input.was_key_released(KeyCode::P) {
             self.previous();
         }
-        if key == KeyCode::R {
+        if input.was_key_released(KeyCode::R) {
             self.current().reset();
         }
-        self.current().key_down(key, ctx);
+        self.current().interact(input, _window);
     }
 
-    fn key_up(&mut self, key: KeyCode, ctx: &mut AppContext<AssetId>) {
-        self.current().key_up(key, ctx);
-    }
-
-    fn advance(&mut self, seconds: f64, ctx: &mut AppContext<AssetId>) {
-        self.current().advance(seconds, ctx);
+    fn update(&mut self, _window: &Window) {
+        self.current().update(_window);
         if self.current().solved {
             self.current().reset();
             self.next();
         }
     }
-
-    fn render(&mut self, renderer: &mut Renderer<AssetId>, ctx: &AppContext<AssetId>) {
-        renderer.clear(BLACK);
-        self.current().render(renderer, ctx);
-    }
 }
 
-fn main() {
-    #[cfg(target_os = "windows")]
-    sdl2::hint::set("SDL_RENDER_DRIVER", "opengles2");
-    let levels = LevelSet::load();
-    let info = AppInfo::with_max_dims(800., 600.)
-        .min_dims(500., 500.)
-        .tile_width(50)
-        .title("Unblock Me!");
-    gate::run(info, levels);
+fn main() -> Result<()> {
+    LevelSet::run(WindowSettings {
+        title: String::from("Unblock Me!"),
+        size: (500, 500),
+        resizable: false,
+        fullscreen: false,
+    })
 }
